@@ -59,6 +59,10 @@ static int nbc_reduce_scatter_init(const void* sendbuf, void* recvbuf, const int
   rank = ompi_comm_rank (comm);
   p = ompi_comm_size (comm);
 
+  if (rank == 0) {
+    printf("Reduce scatter algorithm is: %d\n", libnbc_ireduce_scatter_algorithm);
+  }
+
   res = ompi_datatype_type_extent (datatype, &ext);
   if (MPI_SUCCESS != res) {
     NBC_Error("MPI Error in ompi_datatype_type_extent() (%i)", res);

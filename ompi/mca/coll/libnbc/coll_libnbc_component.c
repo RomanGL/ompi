@@ -91,6 +91,14 @@ static mca_base_var_enum_value_t ireduce_algorithms[] = {
     {0, NULL}
 };
 
+int libnbc_ireduce_scatter_algorithm = 0;   /* ireduce_scatter user forced algorithm */
+static mca_base_var_enum_value_t ireduce_scatter_algorithms[] = {
+    {0, "ignore"},
+    {1, "pairwise_exchange"},
+    {2, "butterfly"},
+    {0, NULL}
+};
+
 int libnbc_iscan_algorithm = 0;             /* iscan user forced algorithm */
 static mca_base_var_enum_value_t iscan_algorithms[] = {
     {0, "ignore"},
@@ -267,6 +275,16 @@ libnbc_register(void)
                                     MCA_BASE_VAR_TYPE_INT, new_enum, 0, MCA_BASE_VAR_FLAG_SETTABLE,
                                     OPAL_INFO_LVL_5, MCA_BASE_VAR_SCOPE_ALL,
                                     &libnbc_ireduce_algorithm);
+    OBJ_RELEASE(new_enum);
+
+    libnbc_ireduce_scatter_algorithm = 0;
+    (void) mca_base_var_enum_create("coll_libnbc_ireduce_scatter_algorithms", ireduce_scatter_algorithms, &new_enum);
+    mca_base_component_var_register(&mca_coll_libnbc_component.super.collm_version,
+                                    "ireduce_scatter_algorithm",
+                                    "Which ireduce_scatter algorithm is used: 0 ignore, 1 pairwise_exchange, 2 butterfly",
+                                    MCA_BASE_VAR_TYPE_INT, new_enum, 0, MCA_BASE_VAR_FLAG_SETTABLE,
+                                    OPAL_INFO_LVL_5, MCA_BASE_VAR_SCOPE_ALL,
+                                    &libnbc_ireduce_scatter_algorithm);
     OBJ_RELEASE(new_enum);
 
     libnbc_iscan_algorithm = 0;
