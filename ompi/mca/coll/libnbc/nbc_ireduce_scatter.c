@@ -276,13 +276,13 @@ static inline int reduce_scatter_butterfly(
   if (comm_size < 2)
       return MPI_SUCCESS;
 
-  printf("Rank: %d: before line %d\n\n", rank, 277);
+  printf("Rank: %d: before line %d\n\n", rank, 280);
   schedule = OBJ_NEW(NBC_Schedule);
   if (OPAL_UNLIKELY(NULL == schedule)) {
     err = OMPI_ERR_OUT_OF_RESOURCE;
     goto cleanup_and_return;
   }
-  printf("Rank: %d: after line %d\n", rank, 277);
+  printf("Rank: %d: after line %d\n", rank, 280);
 
   displs = malloc(sizeof(*displs) * comm_size);
   if (NULL == displs) {
@@ -307,23 +307,23 @@ static inline int reduce_scatter_butterfly(
   precv = tmpbuf[1] - gap;
 
   if (sendbuf != MPI_IN_PLACE) {
-    printf("Rank: %d: before line %d\n\n", rank, 309);
+    printf("Rank: %d: before line %d\n\n", rank, 312);
 
-    err = NBC_Copy(sendbuf, totalcount, dtype, psend, totalcount, dtype, comm);
+    err = NBC_Sched_copy(sendbuf, false, totalcount, dtype, psend, false, totalcount, dtype, schedule, true);
     if (OPAL_UNLIKELY(OMPI_SUCCESS != err)) {
       goto cleanup_and_return;
     }
 
-    printf("Rank: %d: after line %d\n", rank, 309);
+    printf("Rank: %d: after line %d\n", rank, 312);
   } else {
-    printf("Rank: %d: before line %d\n", rank, 318);
+    printf("Rank: %d: before line %d\n", rank, 321);
 
-    err = NBC_Copy(recvbuf, totalcount, dtype, psend, totalcount, dtype, comm);
+    err = NBC_Sched_copy(recvbuf, false, totalcount, dtype, psend, false, totalcount, dtype, schedule, true);
     if (OPAL_UNLIKELY(OMPI_SUCCESS != err)) {
       goto cleanup_and_return;
     }
 
-    printf("Rank: %d: after line %d\n", rank, 318);
+    printf("Rank: %d: after line %d\n", rank, 321);
   }
 
   /*
@@ -349,29 +349,28 @@ static inline int reduce_scatter_butterfly(
   if (rank < 2 * nprocs_rem) {
       if ((rank % 2) == 0) {
           /* Even process */
-          printf("Rank: %d: before line %d\n", rank, 351);
+          printf("Rank: %d: before line %d\n", rank, 354);
 
-          err = NBC_Sched_send(psend, false, totalcount, dtype, rank + 1, schedule, false);
+          err = NBC_Sched_send(psend, false, totalcount, dtype, rank + 1, schedule, true);
           if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
-          printf("Rank: %d: after line %d\n", rank, 351);
+          printf("Rank: %d: after line %d\n", rank, 354);
 
           /* This process does not participate in the rest of the algorithm */
           vrank = -1;
       } else {
           /* Odd process */
-          printf("Rank: %d: before line %d\n", rank, 362);
+          printf("Rank: %d: before line %d\n", rank, 365);
 
-          err = NBC_Sched_recv(precv, true, totalcount, dtype, rank - 1, schedule, false);
+          err = NBC_Sched_recv(precv, false, totalcount, dtype, rank - 1, schedule, true);
           if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
-          printf("Rank: %d: after line %d\n", rank, 362);
-          printf("Rank: %d: before line %d\n", rank, 368);
+          printf("Rank: %d: after line %d\n", rank, 365);
+          printf("Rank: %d: before line %d\n", rank, 371);
 
-          err = NBC_Sched_op(precv, true, psend, true, totalcount,
-                             dtype, op, schedule, true);
+          err = NBC_Sched_op(precv, false, psend, false, totalcount, dtype, op, schedule, true);
           if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
-          printf("Rank: %d: after line %d\n", rank, 368);
+          printf("Rank: %d: after line %d\n", rank, 371);
 
           /* Adjust rank to be the bottom "remain" ranks */
           vrank = rank / 2;
@@ -419,24 +418,24 @@ static inline int reduce_scatter_butterfly(
         index = (recv_index < nprocs_rem) ? 2 * recv_index : nprocs_rem + recv_index;
         ptrdiff_t rdispl = displs[index];
 
-        printf("Rank: %d: before line %d\n", rank, 421);
+        printf("Rank: %d: before line %d\n", rank, 423);
 
         err = NBC_Sched_send(psend + (ptrdiff_t)sdispl * extent, false, send_count,
-                             dtype, peer, schedule, false);
+                             dtype, peer, schedule, true);
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-        printf("Rank: %d: after line %d\n", rank, 421);
-        printf("Rank: %d: before line %d\n", rank, 428);
+        printf("Rank: %d: after line %d\n", rank, 423);
+        printf("Rank: %d: before line %d\n", rank, 430);
 
-        err = NBC_Sched_recv(precv + (ptrdiff_t)sdispl * extent, false, recv_count,
-                             dtype, peer, schedule, false);
+        err = NBC_Sched_recv(precv + (ptrdiff_t)rdispl * extent, false, recv_count,
+                             dtype, peer, schedule, true);
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-        printf("Rank: %d: after line %d\n", rank, 428);         
+        printf("Rank: %d: after line %d\n", rank, 430);         
 
         if (vrank < vpeer) {
           /* precv = psend <op> precv */
-          printf("Rank: %d: before line %d\n", rank, 438);
+          printf("Rank: %d: before line %d\n", rank, 440);
 
           err = NBC_Sched_op(psend + (ptrdiff_t)rdispl * extent, false,
                         precv + (ptrdiff_t)rdispl * extent, false,
@@ -444,14 +443,14 @@ static inline int reduce_scatter_butterfly(
 
           if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-          printf("Rank: %d: after line %d\n", rank, 438);
+          printf("Rank: %d: after line %d\n", rank, 440);
 
           char *p = psend;
           psend = precv;
           precv = p;
         } else {
           /* psend = precv <op> psend */
-          printf("Rank: %d: before line %d\n", rank, 453);
+          printf("Rank: %d: before line %d\n", rank, 455);
 
           err = NBC_Sched_op(precv + (ptrdiff_t)rdispl * extent, false,
                              psend + (ptrdiff_t)rdispl * extent, false,
@@ -459,17 +458,17 @@ static inline int reduce_scatter_butterfly(
 
           if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-          printf("Rank: %d: after line %d\n", rank, 453);
+          printf("Rank: %d: after line %d\n", rank, 455);
         }
         send_index = recv_index;
       }
 
-      printf("Rank: %d: before line %d\n", rank, 466);
+      printf("Rank: %d: before line %d\n", rank, 468);
 
       err = NBC_Sched_barrier(schedule);
       if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-      printf("Rank: %d: after line %d\n", rank, 466);
+      printf("Rank: %d: after line %d\n", rank, 468);
 
       /*
         * psend points to the result block [send_index]
@@ -484,46 +483,46 @@ static inline int reduce_scatter_butterfly(
             * Process has two blocks: for excluded process and own.
             * Send the first block to excluded process.
             */
-          printf("Rank: %d: before line %d\n", rank, 486);
+          printf("Rank: %d: before line %d\n", rank, 488);
 
           err = NBC_Sched_send(psend + (ptrdiff_t)displs[index] * extent, false,
                                recvcounts[index], dtype, peer - 1,
-                               schedule, false);
+                               schedule, true);
           if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-          printf("Rank: %d: after line %d\n", rank, 486);
+          printf("Rank: %d: after line %d\n", rank, 488);
       }
 
       /* If process has two blocks, then send the second block (own block) */
       if (vpeer < nprocs_rem)
           index++;
       if (vpeer != vrank) {
-        printf("Rank: %d: before line %d\n", rank, 500);
+        printf("Rank: %d: before line %d\n", rank, 502);
 
         err = NBC_Sched_send(psend + (ptrdiff_t)displs[index] * extent, false, recvcounts[index],
-                             dtype, peer, schedule, false);
+                             dtype, peer, schedule, true);
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-        printf("Rank: %d: after line %d\n", rank, 500);
-        printf("Rank: %d: before line %d\n", rank, 507);
+        printf("Rank: %d: after line %d\n", rank, 502);
+        printf("Rank: %d: before line %d\n", rank, 509);
 
         err = NBC_Sched_recv(recvbuf, false, recvcounts[rank],
-                             dtype, peer, schedule, false);
+                             dtype, peer, schedule, true);
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-        printf("Rank: %d: after line %d\n", rank, 507);
+        printf("Rank: %d: after line %d\n", rank, 509);
       } else {
-        printf("Rank: %d: before line %d\n", rank, 515);
+        printf("Rank: %d: before line %d\n", rank, 517);
 
         err = NBC_Sched_copy(psend + (ptrdiff_t)displs[rank] * extent, false,
                              recvcounts[rank], dtype,
                              recvbuf, false,
                              recvcounts[rank], dtype,
-                             schedule, false);
+                             schedule, true);
 
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
-        printf("Rank: %d: after line %d\n", rank, 515);
+        printf("Rank: %d: after line %d\n", rank, 517);
       }
 
   } else {
@@ -531,28 +530,28 @@ static inline int reduce_scatter_butterfly(
       int vpeer = ompi_mirror_perm((rank + 1) / 2, log2_size);
       int peer = (vpeer < nprocs_rem) ? vpeer * 2 + 1 : vpeer + nprocs_rem;
 
-      printf("Rank: %d: before line %d\n", rank, 533);
+      printf("Rank: %d: before line %d\n", rank, 535);
 
       err = NBC_Sched_recv(recvbuf, false, recvcounts[rank],
-                           dtype, peer, schedule, false);
+                           dtype, peer, schedule, true);
                            
       if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
-      printf("Rank: %d: after line %d\n", rank, 533);
+      printf("Rank: %d: after line %d\n", rank, 535);
   }
 
-  printf("Rank: %d: before line %d\n", rank, 543);
+  printf("Rank: %d: before line %d\n", rank, 545);
 
   err = NBC_Sched_commit (schedule);
   if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
-  printf("Rank: %d: after line %d\n", rank, 543);
-  printf("Rank: %d: before line %d\n", rank, 549);
+  printf("Rank: %d: after line %d\n", rank, 545);
+  printf("Rank: %d: before line %d\n", rank, 551);
 
   err = NBC_Schedule_request(schedule, comm, module, persistent, request, tmpbuf);
   if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
-  printf("Rank: %d: after line %d\n", rank, 549);
+  printf("Rank: %d: after line %d\n", rank, 551);
 
 cleanup_and_return:
   printf("Rank: %d: cleanup and return\n", rank);
