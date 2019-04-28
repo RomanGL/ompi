@@ -273,8 +273,8 @@ static inline int reduce_scatter_butterfly(
         if (vrank < vpeer) {
           /* precv = psend <op> precv */
           err = NBC_Sched_op(psend + (ptrdiff_t)rdispl * extent, false,
-                        precv + (ptrdiff_t)rdispl * extent, false,
-                        recv_count, dtype, op, schedule, true);
+                             precv + (ptrdiff_t)rdispl * extent, false,
+                             recv_count, dtype, op, schedule, true);
 
           if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
@@ -291,9 +291,6 @@ static inline int reduce_scatter_butterfly(
         }
         send_index = recv_index;
       }
-
-      err = NBC_Sched_barrier(schedule);
-      if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
       /*
         * psend points to the result block [send_index]
@@ -349,18 +346,17 @@ static inline int reduce_scatter_butterfly(
   err = NBC_Sched_commit (schedule);
   if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
-  err = NBC_Schedule_request(schedule, comm, module, persistent, request, tmpbuf);
+  err = NBC_Schedule_request(schedule, comm, module, persistent, request, false);
   if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
 cleanup_and_return:
-  if (displs)
-      free(displs);
-  if (tmpbuf[0])
-      free(tmpbuf[0]);
-  if (tmpbuf[1])
-      free(tmpbuf[1]);
+  // if (displs)
+  //     free(displs);
+  // if (tmpbuf[0])
+  //     free(tmpbuf[0]);
+  // if (tmpbuf[1])
+  //     free(tmpbuf[1]);
 
-  OBJ_RELEASE(schedule);
   return err;
 }
 
