@@ -28,17 +28,14 @@
 #include "nbc_internal.h"
 
 static inline int reduce_scatter_pairwise_exchange(
-    struct ompi_communicator_t *comm,
-    int rank, int comm_size,
-    const void *sendbuf, void *recvbuf, const int *recvcounts, MPI_Datatype datatype,
-    int count, MPI_Op op, ompi_coll_libnbc_module_t *libnbc_module,
-    ompi_request_t ** request, bool persistent);
+  const void *sendbuf, void *recvbuf, const int *recvcounts, MPI_Datatype datatype,
+  MPI_Op op, struct ompi_communicator_t *comm, ompi_coll_libnbc_module_t *libnbc_module,
+  ompi_request_t ** request, bool persistent);
 
 static inline int reduce_scatter_butterfly(
-    const void *sendbuf, void *recvbuf, const int *recvcounts, MPI_Datatype dtype,
-    MPI_Op op, struct ompi_communicator_t *comm,
-    ompi_coll_libnbc_module_t *module,
-    ompi_request_t ** request, bool persistent);
+  const void *sendbuf, void *recvbuf, const int *recvcounts, MPI_Datatype datatype,
+  MPI_Op op, struct ompi_communicator_t *comm, ompi_coll_libnbc_module_t *module,
+  ompi_request_t ** request, bool persistent);
 
 static int ompi_sum_counts(const int *counts, int *displs, int nprocs_rem, int lo, int hi);
 
@@ -46,32 +43,17 @@ static int ompi_sum_counts(const int *counts, int *displs, int nprocs_rem, int l
  * ot the recvcounts array may change, so a comparison of the address
  * would not be sufficient ... we simply do not cache it */
 
-/* binomial reduce to rank 0 followed by a linear scatter ...
- *
- * Algorithm:
- * pairwise exchange
- * round r:
- *  grp = rank % 2^r
- *  if grp == 0: receive from rank + 2^(r-1) if it exists and reduce value
- *  if grp == 1: send to rank - 2^(r-1) and exit function
- *
- * do this for R=log_2(p) rounds
- *
- */
-
 static int nbc_reduce_scatter_init(const void* sendbuf, void* recvbuf, const int *recvcounts, MPI_Datatype datatype,
                                    MPI_Op op, struct ompi_communicator_t *comm, ompi_request_t ** request,
                                    struct mca_coll_base_module_2_3_0_t *module, bool persistent) {
-  int rank, p, res, count;
+  int comm_size, res, totalcount;
   char inplace;  
   ompi_coll_libnbc_module_t *libnbc_module = (ompi_coll_libnbc_module_t*) module;
 
   enum { NBC_REDUCE_SCAT_PAIRWISE_EXCHANGE, NBC_REDUCE_SCAT_BUTTERFLY } alg;
 
   NBC_IN_PLACE(sendbuf, recvbuf, inplace);
-
-  rank = ompi_comm_rank (comm);
-  p = ompi_comm_size (comm);
+  comm_size = ompi_comm_size (comm);
 
   if (libnbc_ireduce_scatter_algorithm == 0) {
     alg = NBC_REDUCE_SCAT_PAIRWISE_EXCHANGE;
@@ -86,12 +68,12 @@ static int nbc_reduce_scatter_init(const void* sendbuf, void* recvbuf, const int
     }
   }
 
-  count = 0;
-  for (int r = 0 ; r < p ; ++r) {
-    count += recvcounts[r];
+  totalcount = 0;
+  for (int r = 0 ; r < comm_size ; ++r) {
+    totalcount += recvcounts[r];
   }
 
-  if ((1 == p && (!persistent || inplace)) || 0 == count) {
+  if ((1 == comm_size && (!persistent || inplace)) || 0 == totalcount) {
     if (!inplace) {
       /* single node not in_place: copy data to recvbuf */
       res = NBC_Copy(sendbuf, recvcounts[0], datatype, recvbuf, recvcounts[0], datatype, comm);
@@ -105,31 +87,78 @@ static int nbc_reduce_scatter_init(const void* sendbuf, void* recvbuf, const int
 
   switch (alg) {
     case NBC_REDUCE_SCAT_PAIRWISE_EXCHANGE:
-      if (rank == 0) printf("Reduce scatter algorithm is: pairwise_exchange\n");
-      res = reduce_scatter_pairwise_exchange(comm, rank, p, sendbuf,
-                                             recvbuf, recvcounts, datatype, count, op,
-                                             libnbc_module, request, persistent);
+      res = reduce_scatter_pairwise_exchange(sendbuf, recvbuf, recvcounts, datatype, 
+                                             op, comm, libnbc_module, request, persistent);
       break;
     case NBC_REDUCE_SCAT_BUTTERFLY:
-      if (rank == 0) printf("Reduce scatter algorithm is: butterfly\n");
-      res = reduce_scatter_butterfly(sendbuf, recvbuf, recvcounts,
-                                    datatype, op, comm, libnbc_module,
-                                    request, persistent);
+      res = reduce_scatter_butterfly(sendbuf, recvbuf, recvcounts, datatype, 
+                                     op, comm, libnbc_module, request, persistent);
       break;
   }
 
-  printf("Reduce scatter: after algorithm selection\n");
-  return OMPI_SUCCESS;
+  return res;
 }
 
+/*
+ * ompi_coll_base_reduce_scatter_intra_butterfly
+ *
+ * Function:  Butterfly algorithm for reduce_scatter
+ * Accepts:   Same as MPI_Reduce_scatter
+ * Returns:   MPI_SUCCESS or error code
+ *
+ * Description:  Implements butterfly algorithm for MPI_Reduce_scatter [*].
+ *               The algorithm can be used both by commutative and non-commutative
+ *               operations, for power-of-two and non-power-of-two number of processes.
+ *
+ * [*] J.L. Traff. An improved Algorithm for (non-commutative) Reduce-scatter
+ *     with an Application // Proc. of EuroPVM/MPI, 2005. -- pp. 129-137.
+ *
+ * Time complexity: O(m\lambda + log(p)\alpha + m\beta + m\gamma),
+ *   where m = sum of rcounts[], p = comm_size
+ * Memory requirements (per process): 2 * m * typesize + comm_size
+ *
+ * Example: comm_size=6, nprocs_pof2=4, nprocs_rem=2, rcounts[]=1, sbuf=[0,1,...,5]
+ * Step 1. Reduce the number of processes to 4
+ * rank 0: [0|1|2|3|4|5]: send to 1: vrank -1
+ * rank 1: [0|1|2|3|4|5]: recv from 0, op: vrank 0: [0|2|4|6|8|10]
+ * rank 2: [0|1|2|3|4|5]: send to 3: vrank -1
+ * rank 3: [0|1|2|3|4|5]: recv from 2, op: vrank 1: [0|2|4|6|8|10]
+ * rank 4: [0|1|2|3|4|5]: vrank 2: [0|1|2|3|4|5]
+ * rank 5: [0|1|2|3|4|5]: vrank 3: [0|1|2|3|4|5]
+ *
+ * Step 2. Butterfly. Buffer of 6 elements is divided into 4 blocks.
+ * Round 1 (mask=1, nblocks=2)
+ * 0: vrank -1
+ * 1: vrank  0 [0 2|4 6|8|10]: exch with 1: send [2,3], recv [0,1]: [0 4|8 12|*|*]
+ * 2: vrank -1
+ * 3: vrank  1 [0 2|4 6|8|10]: exch with 0: send [0,1], recv [2,3]: [**|**|16|20]
+ * 4: vrank  2 [0 1|2 3|4|5] : exch with 3: send [2,3], recv [0,1]: [0 2|4 6|*|*]
+ * 5: vrank  3 [0 1|2 3|4|5] : exch with 2: send [0,1], recv [2,3]: [**|**|8|10]
+ *
+ * Round 2 (mask=2, nblocks=1)
+ * 0: vrank -1
+ * 1: vrank  0 [0 4|8 12|*|*]: exch with 2: send [1], recv [0]: [0 6|**|*|*]
+ * 2: vrank -1
+ * 3: vrank  1 [**|**|16|20] : exch with 3: send [3], recv [2]: [**|**|24|*]
+ * 4: vrank  2 [0 2|4 6|*|*] : exch with 0: send [0], recv [1]: [**|12 18|*|*]
+ * 5: vrank  3 [**|**|8|10]  : exch with 1: send [2], recv [3]: [**|**|*|30]
+ *
+ * Step 3. Exchange with remote process according to a mirror permutation:
+ *         mperm(0)=0, mperm(1)=2, mperm(2)=1, mperm(3)=3
+ * 0: vrank -1: recv "0" from process 0
+ * 1: vrank  0 [0 6|**|*|*]: send "0" to 0, copy "6" to rbuf (mperm(0)=0)
+ * 2: vrank -1: recv result "12" from process 4
+ * 3: vrank  1 [**|**|24|*]
+ * 4: vrank  2 [**|12 18|*|*]: send "12" to 2, send "18" to 3, recv "24" from 3
+ * 5: vrank  3 [**|**|*|30]: copy "30" to rbuf (mperm(3)=3)
+ */
 static inline int reduce_scatter_butterfly(
-  const void *sendbuf, void *recvbuf, const int *recvcounts, MPI_Datatype dtype,
-  MPI_Op op, struct ompi_communicator_t *comm,
-  ompi_coll_libnbc_module_t *module,
+  const void *sendbuf, void *recvbuf, const int *recvcounts, MPI_Datatype datatype,
+  MPI_Op op, struct ompi_communicator_t *comm, ompi_coll_libnbc_module_t *module,
   ompi_request_t ** request, bool persistent)
 {
   NBC_Schedule *schedule;
-  char *tmpbuf[2] = {NULL, NULL}, *psend, *precv;
+  char *tmpbuf = NULL, *psend, *precv;
   int *displs = NULL, index;
   ptrdiff_t span, gap, totalcount, extent;
   int err = MPI_SUCCESS;
@@ -156,25 +185,24 @@ static inline int reduce_scatter_butterfly(
   }
   totalcount = displs[comm_size - 1] + recvcounts[comm_size - 1];
 
-  ompi_datatype_type_extent(dtype, &extent);
-  span = opal_datatype_span(&dtype->super, totalcount, &gap);
-  tmpbuf[0] = malloc(span);
-  tmpbuf[1] = malloc(span);
-  if (NULL == tmpbuf[0] || NULL == tmpbuf[1]) {
+  ompi_datatype_type_extent(datatype, &extent);
+  span = opal_datatype_span(&datatype->super, totalcount, &gap);
+  tmpbuf = malloc(span * 2);
+  if (NULL == tmpbuf) {
       err = OMPI_ERR_OUT_OF_RESOURCE;
       goto cleanup_and_return;
   }
 
-  psend = tmpbuf[0] - gap;
-  precv = tmpbuf[1] - gap;
+  psend = tmpbuf - gap;
+  precv = (tmpbuf + span) - gap;
 
   if (sendbuf != MPI_IN_PLACE) {
-    err = NBC_Sched_copy(sendbuf, false, totalcount, dtype, psend, false, totalcount, dtype, schedule, true);
+    err = NBC_Sched_copy(sendbuf, false, totalcount, datatype, psend, false, totalcount, datatype, schedule, true);
     if (OPAL_UNLIKELY(OMPI_SUCCESS != err)) {
       goto cleanup_and_return;
     }
   } else {
-    err = NBC_Sched_copy(recvbuf, false, totalcount, dtype, psend, false, totalcount, dtype, schedule, true);
+    err = NBC_Sched_copy(recvbuf, false, totalcount, datatype, psend, false, totalcount, datatype, schedule, true);
     if (OPAL_UNLIKELY(OMPI_SUCCESS != err)) {
       goto cleanup_and_return;
     }
@@ -203,17 +231,17 @@ static inline int reduce_scatter_butterfly(
   if (rank < 2 * nprocs_rem) {
       if ((rank % 2) == 0) {
           /* Even process */
-          err = NBC_Sched_send(psend, false, totalcount, dtype, rank + 1, schedule, false);
+          err = NBC_Sched_send(psend, false, totalcount, datatype, rank + 1, schedule, false);
           if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
           /* This process does not participate in the rest of the algorithm */
           vrank = -1;
       } else {
           /* Odd process */
-          err = NBC_Sched_recv(precv, false, totalcount, dtype, rank - 1, schedule, true);
+          err = NBC_Sched_recv(precv, false, totalcount, datatype, rank - 1, schedule, true);
           if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
-          err = NBC_Sched_op(precv, false, psend, false, totalcount, dtype, op, schedule, true);
+          err = NBC_Sched_op(precv, false, psend, false, totalcount, datatype, op, schedule, true);
           if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
           /* Adjust rank to be the bottom "remain" ranks */
@@ -263,18 +291,18 @@ static inline int reduce_scatter_butterfly(
         ptrdiff_t rdispl = displs[index];
 
         err = NBC_Sched_send(psend + (ptrdiff_t)sdispl * extent, false, send_count,
-                             dtype, peer, schedule, false);
+                             datatype, peer, schedule, false);
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
         err = NBC_Sched_recv(precv + (ptrdiff_t)rdispl * extent, false, recv_count,
-                             dtype, peer, schedule, true);
+                             datatype, peer, schedule, true);
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
         if (vrank < vpeer) {
           /* precv = psend <op> precv */
           err = NBC_Sched_op(psend + (ptrdiff_t)rdispl * extent, false,
                              precv + (ptrdiff_t)rdispl * extent, false,
-                             recv_count, dtype, op, schedule, true);
+                             recv_count, datatype, op, schedule, true);
 
           if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
@@ -285,7 +313,7 @@ static inline int reduce_scatter_butterfly(
           /* psend = precv <op> psend */
           err = NBC_Sched_op(precv + (ptrdiff_t)rdispl * extent, false,
                              psend + (ptrdiff_t)rdispl * extent, false,
-                             recv_count, dtype, op, schedule, true);
+                             recv_count, datatype, op, schedule, true);
 
           if (MPI_SUCCESS != err) { goto cleanup_and_return; }
         }
@@ -306,7 +334,7 @@ static inline int reduce_scatter_butterfly(
             * Send the first block to excluded process.
             */
           err = NBC_Sched_send(psend + (ptrdiff_t)displs[index] * extent, false,
-                               recvcounts[index], dtype, peer - 1,
+                               recvcounts[index], datatype, peer - 1,
                                schedule, false);
           if (MPI_SUCCESS != err) { goto cleanup_and_return; }
       }
@@ -316,17 +344,17 @@ static inline int reduce_scatter_butterfly(
           index++;
       if (vpeer != vrank) {
         err = NBC_Sched_send(psend + (ptrdiff_t)displs[index] * extent, false, recvcounts[index],
-                             dtype, peer, schedule, false);
+                             datatype, peer, schedule, false);
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
 
         err = NBC_Sched_recv(recvbuf, false, recvcounts[rank],
-                             dtype, peer, schedule, true);
+                             datatype, peer, schedule, true);
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
       } else {
         err = NBC_Sched_copy(psend + (ptrdiff_t)displs[rank] * extent, false,
-                             recvcounts[rank], dtype,
+                             recvcounts[rank], datatype,
                              recvbuf, false,
-                             recvcounts[rank], dtype,
+                             recvcounts[rank], datatype,
                              schedule, true);
 
         if (MPI_SUCCESS != err) { goto cleanup_and_return; }
@@ -338,7 +366,7 @@ static inline int reduce_scatter_butterfly(
       int peer = (vpeer < nprocs_rem) ? vpeer * 2 + 1 : vpeer + nprocs_rem;
 
       err = NBC_Sched_recv(recvbuf, false, recvcounts[rank],
-                           dtype, peer, schedule, true);
+                           datatype, peer, schedule, true);
                            
       if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
   }
@@ -346,34 +374,52 @@ static inline int reduce_scatter_butterfly(
   err = NBC_Sched_commit (schedule);
   if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
-  err = NBC_Schedule_request(schedule, comm, module, persistent, request, false);
+  err = NBC_Schedule_request(schedule, comm, module, persistent, request, tmpbuf);
   if (OMPI_SUCCESS != err) { goto cleanup_and_return; }
 
 cleanup_and_return:
-  // if (displs)
-  //     free(displs);
-  // if (tmpbuf[0])
-  //     free(tmpbuf[0]);
-  // if (tmpbuf[1])
-  //     free(tmpbuf[1]);
+  if (displs)
+    free(displs);
+
+  if (OMPI_SUCCESS != err) {
+    OBJ_RELEASE(schedule);
+    free(tmpbuf);
+  }
 
   return err;
 }
 
+/* binomial reduce to rank 0 followed by a linear scatter ...
+ *
+ * Algorithm:
+ * pairwise exchange
+ * round r:
+ *  grp = rank % 2^r
+ *  if grp == 0: receive from rank + 2^(r-1) if it exists and reduce value
+ *  if grp == 1: send to rank - 2^(r-1) and exit function
+ *
+ * do this for R=log_2(p) rounds
+ *
+ */
 static inline int reduce_scatter_pairwise_exchange(
-    struct ompi_communicator_t *comm,
-    int rank, int comm_size,
-    const void *sendbuf, void *recvbuf, const int *recvcounts, MPI_Datatype datatype,
-    int count, MPI_Op op, ompi_coll_libnbc_module_t *libnbc_module,
-    ompi_request_t ** request, bool persistent) 
+  const void *sendbuf, void *recvbuf, const int *recvcounts, MPI_Datatype datatype,
+  MPI_Op op, struct ompi_communicator_t *comm, ompi_coll_libnbc_module_t *libnbc_module,
+  ompi_request_t ** request, bool persistent) 
 {
   MPI_Aint ext;
   NBC_Schedule *schedule;
-  int res, maxr, peer;
+  int res, maxr, peer, totalcount;
   ptrdiff_t gap, span, span_align;
   void *tmpbuf;
   char *rbuf, *lbuf, *buf, *sbuf;
- 
+  int comm_size = ompi_comm_size(comm);
+  int rank = ompi_comm_rank(comm);
+
+  totalcount = 0;
+  for (int r = 0 ; r < comm_size ; ++r) {
+    totalcount += recvcounts[r];
+  }
+
   res = ompi_datatype_type_extent (datatype, &ext);
   if (MPI_SUCCESS != res) {
     NBC_Error("MPI Error in ompi_datatype_type_extent() (%i)", res);
@@ -383,7 +429,7 @@ static inline int reduce_scatter_pairwise_exchange(
   res = OMPI_SUCCESS;
   maxr = (int) ceil ((log((double) comm_size) / LOG2));
 
-  span = opal_datatype_span(&datatype->super, count, &gap);
+  span = opal_datatype_span(&datatype->super, totalcount, &gap);
   span_align = OPAL_ALIGN(span, datatype->super.align, ptrdiff_t);
   tmpbuf = malloc (span_align + span);
   if (OPAL_UNLIKELY(NULL == tmpbuf)) {
@@ -405,7 +451,7 @@ static inline int reduce_scatter_pairwise_exchange(
       peer = rank + (1 << (r - 1));
       if (peer < comm_size) {
         /* we have to wait until we have the data */
-        res = NBC_Sched_recv(rbuf, true, count, datatype, peer, schedule, true);
+        res = NBC_Sched_recv(rbuf, true, totalcount, datatype, peer, schedule, true);
         if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
           OBJ_RELEASE(schedule);
           free(tmpbuf);
@@ -415,11 +461,11 @@ static inline int reduce_scatter_pairwise_exchange(
         /* this cannot be done until tmpbuf is unused :-( so barrier after the op */
         if (firstred) {
           /* take reduce data from the sendbuf in the first round -> save copy */
-          res = NBC_Sched_op (sendbuf, false, rbuf, true, count, datatype, op, schedule, true);
+          res = NBC_Sched_op (sendbuf, false, rbuf, true, totalcount, datatype, op, schedule, true);
           firstred = 0;
         } else {
           /* perform the reduce in my local buffer */
-          res = NBC_Sched_op (lbuf, true, rbuf, true, count, datatype, op, schedule, true);
+          res = NBC_Sched_op (lbuf, true, rbuf, true, totalcount, datatype, op, schedule, true);
         }
 
         if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
@@ -435,10 +481,10 @@ static inline int reduce_scatter_pairwise_exchange(
       peer = rank - (1 << (r - 1));
       if (firstred) {
         /* we have to send the senbuf */
-        res = NBC_Sched_send (sendbuf, false, count, datatype, peer, schedule, false);
+        res = NBC_Sched_send (sendbuf, false, totalcount, datatype, peer, schedule, false);
       } else {
         /* we send an already reduced value from lbuf */
-        res = NBC_Sched_send (lbuf, true, count, datatype, peer, schedule, false);
+        res = NBC_Sched_send (lbuf, true, totalcount, datatype, peer, schedule, false);
       }
       if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
         OBJ_RELEASE(schedule);

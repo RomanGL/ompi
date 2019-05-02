@@ -36,7 +36,7 @@ BEGIN_C_DECLS
 /*********************** LibNBC tuning parameters ************************/
 
 /* the debug level */
-#define NBC_DLEVEL 5
+#define NBC_DLEVEL 0
 
 /* enable schedule caching - undef NBC_CACHE_SCHEDULE to deactivate it */
 /* TODO: this whole schedule cache stuff does not work with the tmbuf
